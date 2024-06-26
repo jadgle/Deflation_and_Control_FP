@@ -1,0 +1,345 @@
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                                                                                                                    %
+%%                          Solving HKB steady states with Newton (and deflation) method                            %% 
+%                                                                                                                    %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+close all
+clear all
+clc
+global L nt a_infty D M1 B
+
+r = 0.1;
+e = 0.005;
+
+W = @(z) (z).*(abs(z)<=r)+(-(r^2+r*e)-r*z)/e.*(z>-r-e).*(z<-r)+((r^2+r*e)-r*z)/e.*(z<r+e).*(z>r);
+
+
+%% Discretization
+
+l = 50; %number of modes
+
+% basis functions
+
+
+psi  = cell(2*l+1,1);
+dpsi = cell(2*l+1,1);
+
+psi{1}  = @(y) ones(size(y));
+dpsi{1} = @(y) zeros(size(y));
+
+for i = 1:l
+        psi{i+1}   = @(y) sin(2*pi*i*y);
+        psi{l+i+1} = @(y) cos(2*pi*i*y);
+        dpsi{i+1}   = @(y) 2*pi*i*cos(2*pi*i*y);
+        dpsi{l+i+1} = @(y) -2*pi*i*sin(2*pi*i*y);
+end
+
+
+%% Generating the system matrices
+
+% prepping for Gauss quadratures
+n_gauss = 200;
+[xi,wi]=Gauss_quad(n_gauss,0,1);
+
+% linear components of the equation 
+L = size(psi,1); 
+C1 = zeros(L);
+A1 = zeros(L,1);
+M = zeros(L,1);
+
+for i = 1:L
+    df_i = dpsi{i};
+    f_i  = psi{i};
+    A1(i)       =  sum(df_i(xi).^2.*wi);
+    M(i)        =  sum(f_i(xi).^2.*wi);
+    for j = 1:L
+        df_j = dpsi{j};
+    end
+end
+
+M1 = diag(M.^-1);
+
+% bilinear term
+
+%%
+B = zeros(L,L,L); 
+convo_integrand = @(s,x_bar,f_k) (f_k(s).*(W(x_bar-s)));
+integrand1 = @(s,f_n,df_m,conv) f_n(s).*conv.*df_m(s);
+
+tic
+parfor k = 1:L
+    convolution = zeros(n_gauss,1);
+    f_k = psi{k};
+    for i = 1:n_gauss
+        x_bar = xi(i);
+        convolution(i) = sum(convo_integrand(xi,x_bar,f_k).*wi);
+    end
+
+    for m = 1:L
+        df_m = dpsi{m}; 
+        for n = 1:L
+            f_n  = psi{n}; 
+            B(n,k,m) = sum(integrand1(xi,f_n,df_m,convolution).*wi);
+        end
+    end
+end
+toc
+
+%% Simulation for the initial guess
+guess0 =ones(size(xi));
+guess0 = guess0/(sum(guess0.*wi));
+guess = coeffs(xi,wi,l,guess0);
+x0 = guess;
+beta_m1 = 3e-4;
+A2 = beta_m1*diag(A1);
+t_interval = [0,1000];
+[t,u] = ode15s(@(t,u) odefcn(t,u,A2,B,C1,M1) , t_interval , x0);
+
+
+%
+figure(1)
+basis = zeros(n_gauss,L);
+for i = 1:L
+    f_i = psi{i};
+    basis(:,i) = f_i(xi);
+end
+
+for i = 1:length(t)
+    f = sum(u(i,:).*basis,2);
+    f = f/(sum(f.*wi));
+    plot3(ones(size(xi))*t(i),xi,f)
+    hold on
+end
+guess = u(end,:)';
+
+hold off
+
+
+
+%% Newton with deflation
+%beta_m1 = 2.5e-4;
+%A2 = beta_m1*diag(A1);
+%A2 = beta_m1*diag(A1);
+A = [A2;zeros(1,L)]; % integral=1 condition
+C = [C1;zeros(1,L)]; % integral=1 condition
+
+for i = 1:L
+    f_i = psi{i};
+    A(end,i) = sum(f_i(xi).*wi);
+end
+
+update = 100;         % turning off the convergence flag
+tolerance = 1e-3;    % tolerance for convergence # 2e-4
+max_iteration = 1e3;  % number of before assuming failed convergence
+
+n_deflation = 0; % counter for the number of solutions
+iteration = 0;   % counter for the number of iterations
+
+solutions = [];  % list of solutions
+
+% parameters and start for deflation
+p = 3;        % deflation power #3
+shift = .1;  % deflation shift #1
+eta0 = @(u) 1; 
+new_eta = @(u) 1;
+deta0 = @(u) zeros(size(u));
+new_deta = @(u) zeros(size(u));
+trying = 1;
+
+%guess = u_unif;
+while trying < 2 % this is trying>2 is useful when we are changing initial condition
+    u = guess;
+    u_new = u;
+    while (update>tolerance && iteration < max_iteration)% && norm(F(u,A,B,C))>tolerance) 
+        iteration = iteration + 1;
+        
+        % undeflated system at u
+        f  = F(u,A,B,C);
+        df = dF(u,A,B,C);
+        
+        % updating the deflation operator
+        eta_now  = new_eta(u);
+        deta_now = new_deta(u);
+        eta_pre  = eta0(u);
+        deta_pre = deta0(u);
+        
+        % deflated system at u
+        G  = f./(eta_pre*eta_now)+shift*f;
+        dG = df./(eta_pre*eta_now) - (f./(eta_pre.^2*eta_now.^2))*(deta_pre*eta_now + eta_pre*deta_now)' + shift*df;
+        
+        % update for u 
+        u_new  = u - pinv(dG)*G;
+        update = norm(u_new-u);
+        u      = u_new;
+    end
+    
+    if (iteration == max_iteration || sum(isnan(u))>1) % if the previous loop has finished without convergence, we start
+        trying = trying + 1;                         % again from a different initial guess
+        guess =rand(size(u));   % exploring different initial guess
+        %guess = u_uniform; % checking if the uniform distribution is a solution    
+
+    else   % if the previous loop has finished with convergence, we deflate w.r.t. the reached root
+        % updating the deflation eta
+        deta0 =  @(r) new_deta(r)*eta0(r)+new_eta(r)*deta0(r);
+        eta0  =  @(r) new_eta(r)*eta0(r);
+        new_eta  =  @(r) norm(r-u_new).^p;
+        new_deta =  @(r) (p*norm(r-u_new)^(p-2))*(r-u_new); % problem with dimension in dG, see handwritten notes 
+        
+        disp(['Solution for the ',int2str(n_deflation),'-th deflation found after ',int2str(iteration),' iterations'])
+        n_deflation = n_deflation + 1;
+        solutions = [solutions,u];
+        %guess =rand(size(u));
+        update    = 100;  % reset of the convergence flag 
+        iteration = 0;    % reset of the divergence  flag
+    end
+     
+end
+%%
+figure(2)
+set(0,'DefaultTextInterpreter','latex')
+set(0,'DefaultLegendInterpreter','latex')
+set(0,'DefaultAxesTickLabelInterpreter','latex')
+set(0,'defaultAxesXGrid','on')
+set(0,'defaultAxesYGrid','on')
+set(0,'DefaultLegendFontSize',24)
+set(0,'DefaultTextFontSize',20)
+set(0,'DefaultAxesFontSize',26)
+set(0,'DefaultLineLineWidth',1.2);
+set(gcf,'color','w');
+
+
+for n = 1:size(solutions,2)
+    
+    u = solutions(:,n);
+    f = sum(u'.*basis,2);
+    
+    if sum(f<0)<100 && norm(F(u,A,B,C))<2e-5
+        n
+        norm(F(u,A,B,C))
+        plot(xi,f','linewidth',3) 
+        hold on
+        pause
+    end
+end
+
+hold off
+
+
+%% Control matrix D
+D = zeros(L,L,L);
+for k = 1:L
+    f_k = psi{k}(xi);
+    for m = 1:L
+        df_m = dpsi{m}(xi); 
+        for n = 1:L
+            f_n  = psi{n}(xi); 
+            D(n,k,m) = sum(f_k.*df_m.*f_n.*wi);
+        end
+    end
+end
+
+%% Stabilizing control (MPC)
+
+a_infty = solutions(:,1);
+rho_infty = sum(a_infty'.*basis,2); % we want to stabilize around an unstable steady state
+gamma = .2; %5 
+% temporal discretization
+T = 1000;
+dT = 0.1;
+nT = T/dT+1;
+tf=60; %10
+dt=0.1; %0.01
+nt=tf/dt+1;
+t=0;
+%
+X=zeros(L,nT); 
+u=zeros(L,nT);
+guess0 =ones(size(xi));
+guess0 = guess0/(sum(guess0.*wi));
+guess = coeffs(xi,wi,l,guess0);
+x0 = guess;
+
+%
+u00=[zeros(L,nt)];
+Mass = diag(M);
+forward   = @(a,u) odefw_c(a,u,A2,C1);
+dforward  = @(a,u) odedfw_c(a,u,A2,C1);
+backward  = @(a,p,u) odebw_c(a,p,u,A2,C1,Mass,gamma);
+dbackward = @(a,p,u) odedbw_c(a,p,u,A2,C1,Mass);
+
+
+tic
+X(:,1) = guess;
+%%
+for time_step = 2:nT
+    time_step
+    x0 = X(:,time_step-1);
+    % first iteration
+    [X00]=IRK(x0,u00,dt,forward,dforward);                      %forward pass
+    [P0,dJ0]=IRKadj(X00,u00,dt,backward,dbackward,gamma,Mass);  %backward pass
+    u0 = u00*0;
+    %
+    for k=1:nt
+        u0(:,k) = u00(:,k) - 1e-6*dJ0(:,k);
+    end    
+    [X0]=IRK(x0,u0,dt,forward,dforward);                       %forward pass      
+    % second iteration    
+    [P1,dJ1]=IRKadj(X0,u0,dt,backward,dbackward, gamma, Mass);  %backward pass
+        u1 = u0*0;
+    %%k
+    for k=1:nt
+        u1(:,k) = u0(:,k) - 1e-6*dJ1(:,k);
+    end
+    [X1]=IRK(x0,u1,dt,forward,dforward);  
+
+    % updating variables
+    X(:,time_step) = X1(:,2);
+    u(:,time_step) = u1(:,1);
+end
+toc
+
+
+%% uncontrolled dynamics
+u00=[zeros(L,nT)];
+nt=nT;
+[X_uncontrolled]=IRK(guess,u00*0,dt,forward,dforward); 
+
+%% plotting the results (norm)
+n = nt;
+norma = zeros(1,n);
+norma_uncontrolled = norma;
+k = 1;
+for t = 1:58
+    norma(k) = (X(:,t)-a_infty)'*Mass*(X(:,t)-a_infty);
+    k = k+1;
+end
+k=1;
+for t = 1:101
+    norma_uncontrolled(k) = (X_uncontrolled(:,t)-a_infty)'*Mass*(X_uncontrolled(:,t)-a_infty);
+    k = k+1;
+end
+figure(2)
+plot(1:58,norma(1:58),'ro')
+hold on
+plot(1:101,norma_uncontrolled(1:101),'b*')
+
+%%
+figure(4)
+for n = 1:18
+    a = X(:,n)-a_infty;
+    f = sum(a'.*basis,2);
+    plot3(xi,ones(size(xi))*dt*n,f)
+    hold on
+end
+hold off
+%%
+figure(4)
+for n = 1:10:nt
+    a = u(:,n);
+    u = sum(a'.*basis,2);
+    plot3(xi,ones(size(xi))*dt*n,u)
+    hold on
+end
+hold off
+
