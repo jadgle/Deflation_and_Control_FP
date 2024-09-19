@@ -212,7 +212,7 @@ S = [ones(n_gauss,1)*-1,cos(2*pi*xi)];
 c = [];
 labels = [];
 k=0;
-disp('----- Norm of the Residual and |e^b-1/Z|  -----')
+disp('------------- |alpha|  -------------')
 tol = 3e-2;
 for n = 1:n_deflation
     u = solutions(:,n);
@@ -225,4 +225,3 @@ for n = 1:n_deflation
         k = k+1;
     end
 end
-
